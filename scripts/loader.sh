@@ -35,7 +35,7 @@ if [ ${COUNT} -eq 1 ]; then
 	IMG=`sed -n "/PATH=/p" ${INI} | tr -d '\r' | cut -d '=' -f 2`
 	cp ${IMG} ./
 else
-	./tools/boot_merger ${INI}
+	$(dirname $(dirname "$0"))/tools/boot_merger ${INI}
 fi
 
 echo "pack loader okay! Input: ${INI}"

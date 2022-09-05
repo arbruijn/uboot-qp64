@@ -4,6 +4,7 @@
  * SPDX-License-Identifier:	GPL-2.0+
  */
 #include "boot_merger.h"
+#include <u-boot/sha256.h>
 #include <time.h>
 #include <sys/stat.h>
 #include <version.h>
@@ -27,6 +28,7 @@ char gEat[MAX_LINE_LEN];
 char *gConfigPath;
 uint8_t *gBuf;
 bool enableRC4 = false;
+bool newMerger = true;
 
 static uint32_t g_merge_max_size = MAX_MERGE_SIZE;
 
@@ -315,6 +317,8 @@ static bool parseLoader(FILE *file)
 
 static bool parseOut(FILE *file)
 {
+	fpos_t prev;
+
 	if (SCANF_EAT(file) != 0) {
 		return false;
 	}
@@ -322,6 +326,124 @@ static bool parseOut(FILE *file)
 		return false;
 	/* fixPath(gOpts.outPath); */
 	printf("out:%s\n", gOpts.outPath);
+
+	if (fgetpos(file, &prev))
+		return false;
+	if (SCANF_EAT(file) != 0) {
+		return false;
+	}
+	if (fscanf(file, OPT_IDB_PATH "=%[^\r^\n]", gOpts.idbPath) != 1) {
+		if (fsetpos(file, &prev))
+			return false;
+	} else {
+		LOGD("idbPath:%s\n", gOpts.idbPath);
+	}
+
+	return true;
+}
+
+static bool parseBool(const char *buf, bool *result)
+{
+	if (!strcasecmp(buf, "true")) {
+		*result = true;
+		return true;
+	} else if (!strcasecmp(buf, "false")) {
+		*result = false;
+		return true;
+	}
+	return false;
+}
+
+static bool parseSystem(FILE *file)
+{
+	char buf[MAX_LINE_LEN];
+
+	if (SCANF_EAT(file) != 0) {
+		return false;
+	}
+	if (fscanf(file, OPT_NEW_IDB "=%[^\r^\n]", buf) != 1)
+		return false;
+	if (!parseBool(buf, &gOpts.newIDB)) {
+		LOGE("non bool value for NEWIDB: %s\n", buf);
+		return false;
+	}
+	LOGD("newIDB:%s\n", gOpts.newIDB ? "true" : "false");
+	return true;
+}
+
+static bool parseFlag(FILE *file)
+{
+	char buf[MAX_LINE_LEN];
+	fpos_t prev;
+
+	if (fgetpos(file, &prev))
+		return false;
+	if (SCANF_EAT(file) != 0) {
+		return false;
+	}
+	if (fscanf(file, OPT_471_RC4_OFF "=%[^\r^\n]", buf) != 1) {
+		if (fsetpos(file, &prev))
+			return false;
+	} else {
+		if (!parseBool(buf, &gOpts.rc4Off471)) {
+			LOGE("non bool value for 471_RC4_OFF: %s\n", buf);
+			return false;
+		}
+		LOGD("rc4Off471:%s\n", gOpts.rc4Off471 ? "true" : "false");
+	}
+
+	if (SCANF_EAT(file) != 0) {
+		return false;
+	}
+	if (fscanf(file, OPT_RC4_OFF "=%[^\r^\n]", buf) != 1)
+		return false;
+	if (!parseBool(buf, &gOpts.rc4Off)) {
+		LOGE("non bool value for RC4_OFF: %s\n", buf);
+		return false;
+	}
+	LOGD("rc4Off:%s\n", gOpts.rc4Off ? "true" : "false");
+
+	if (fgetpos(file, &prev))
+		return false;
+	if (SCANF_EAT(file) != 0) {
+		return false;
+	}
+	if (fscanf(file, OPT_CREATE_IDB "=%[^\r^\n]", buf) != 1) {
+		if (fsetpos(file, &prev))
+			return false;
+	} else {
+		if (!parseBool(buf, &gOpts.createIDB)) {
+			LOGE("non bool value for CREATE_IDB: %s\n", buf);
+			return false;
+		}
+		LOGD("createIDB:%s\n", gOpts.createIDB ? "true" : "false");
+	}
+
+	return true;
+}
+
+static bool parseBootParam(FILE *file, uint32_t *param, int count)
+{
+	char buf[MAX_LINE_LEN], *p;
+	char pattern[32];
+
+	if (SCANF_EAT(file) != 0) {
+		return false;
+	}
+	for (int i = 0; i < count; i++) {
+		if (SCANF_EAT(file) != 0) {
+			return false;
+		}
+		snprintf(pattern, sizeof(pattern), OPT_WORD "%d=%%[^\r^\n]", i);
+		if (fscanf(file, pattern, buf) != 1)
+			return false;
+		param[i] = strtol(buf, &p, 0);
+		if (*p) {
+			LOGE("non int value for WORD_%d: %s\n", i, buf);
+			return false;
+		}
+		LOGD("WORD_%d:0x%x\n", i, param[i]);
+	}
 	return true;
 }
 
@@ -366,6 +488,10 @@ static bool parseOpts_from_file(void)
 	bool code472Ok = true;
 	bool loaderOk = false;
 	bool outOk = false;
+	bool systemOk = false;
+	bool flagOk = false;
+	bool boot0ParamOk = false;
+	bool boot1ParamOk = false;
 	char buf[MAX_LINE_LEN];
 
 	char *configPath = (gConfigPath == NULL) ? DEF_CONFIG_FILE : gConfigPath;
@@ -423,6 +549,30 @@ static bool parseOpts_from_file(void)
 			outOk = parseOut(file);
 			if (!outOk) {
 				LOGE("parseOut failed!\n");
+				goto end;
+			}
+		} else if (!strcmp(buf, SEC_SYSTEM)) {
+			systemOk = parseSystem(file);
+			if (!systemOk) {
+				LOGE("parseSystem failed!\n");
+				goto end;
+			}
+		} else if (!strcmp(buf, SEC_FLAG)) {
+			flagOk = parseFlag(file);
+			if (!flagOk) {
+				LOGE("parseFlag failed!\n");
+				goto end;
+			}
+		} else if (!strcmp(buf, SEC_BOOT0_PARAM)) {
+			boot0ParamOk = parseBootParam(file, gOpts.boot0Param, 10);
+			if (!boot0ParamOk) {
+				LOGE("parseBoot0Param failed!\n");
+				goto end;
+			}
+		} else if (!strcmp(buf, SEC_BOOT1_PARAM)) {
+			boot1ParamOk = parseBootParam(file, gOpts.boot1Param, 8);
+			if (!boot1ParamOk) {
+				LOGE("parseBoot1Param failed!\n");
 				goto end;
 			}
 		} else if (buf[0] == '#') {
@@ -550,7 +700,6 @@ static inline void str2wide(const char *str, uint16_t *wide, int len)
 	for (i = 0; i < len; i++) {
 		wide[i] = (uint16_t) str[i];
 	}
-	wide[len] = 0;
 }
 
 static inline void getName(char *path, uint16_t *dst)
@@ -565,16 +714,16 @@ static inline void getName(char *path, uint16_t *dst)
 		start = path;
 	else
 		start++;
-	end = strrchr(path, '.');
+	end = newMerger ? strchr(path, '.') : strrchr(path, '.');
 	if (!end)
 		end = path + strlen(path);
 	len = end - start;
 	if (len >= MAX_NAME_LEN)
-		len = MAX_NAME_LEN - 1;
+		len = newMerger ? MAX_NAME_LEN : MAX_NAME_LEN - 1;
 	str2wide(start, dst, len);
 
 	if (gDebug) {
-		char name[MAX_NAME_LEN];
+		char name[MAX_NAME_LEN + 1];
 		memset(name, 0, sizeof(name));
 		memcpy(name, start, len);
 		LOGD("path:%s, name:%s\n", path, name);
@@ -609,7 +758,7 @@ static inline rk_time getTime(void)
 	return rkTime;
 }
 
-static bool writeFile(FILE *outFile, const char *path, bool fix)
+static bool writeFile(FILE *outFile, const char *path, bool fix, bool rc4Off)
 {
 	bool ret = false;
 	uint32_t size = 0, fixSize = 0;
@@ -637,18 +786,20 @@ static bool writeFile(FILE *outFile, const char *path, bool fix)
 
 		buf = gBuf;
 		size = fixSize;
-		while (1) {
-			P_RC4(buf, fixSize < SMALL_PACKET ? fixSize : SMALL_PACKET);
-			buf += SMALL_PACKET;
-			if (fixSize <= SMALL_PACKET)
-				break;
-			fixSize -= SMALL_PACKET;
-		}
+		if (!rc4Off)
+			while (1) {
+				P_RC4(buf, fixSize < SMALL_PACKET ? fixSize : SMALL_PACKET);
+				buf += SMALL_PACKET;
+				if (fixSize <= SMALL_PACKET)
+					break;
+				fixSize -= SMALL_PACKET;
+			}
 	} else {
 		uint32_t tmp = size % ENTRY_ALIGN;
 		tmp = tmp ? (ENTRY_ALIGN - tmp) : 0;
 		size += tmp;
-		P_RC4(gBuf, size);
+		if (!rc4Off)
+			P_RC4(gBuf, size);
 	}
 
 	if (!fwrite(gBuf, size, 1, outFile))
@@ -753,10 +904,11 @@ end:
 static inline void getBoothdr(rk_boot_header *hdr)
 {
 	memset(hdr, 0, sizeof(rk_boot_header));
-	hdr->tag = TAG;
+	hdr->tag = gOpts.newIDB ? TAG_NEW : TAG;
 	hdr->size = sizeof(rk_boot_header);
-	hdr->version = (getBCD(gOpts.major) << 8) | getBCD(gOpts.minor);
-	hdr->mergerVersion = MERGER_VERSION;
+	hdr->version = newMerger ? (gOpts.major << 8) | gOpts.minor :
+		(getBCD(gOpts.major) << 8) | getBCD(gOpts.minor);
+	hdr->mergerVersion = newMerger ? MERGER_VERSION_NEW : MERGER_VERSION;
 	hdr->releaseTime = getTime();
 	hdr->chipType = getChipType(gOpts.chip);
 
@@ -771,8 +923,10 @@ static inline void getBoothdr(rk_boot_header *hdr)
 	hdr->loaderNum = gOpts.loaderNum;
 	hdr->loaderOffset = hdr->code472Offset + gOpts.code472Num * hdr->code472Size;
 	hdr->loaderSize = sizeof(rk_boot_entry);
-	if (!enableRC4)
+	if (newMerger ? gOpts.rc4Off : !enableRC4)
 		hdr->rc4Flag = 1;
+	if (gOpts.newIDB && gOpts.rc4Off471)
+		hdr->rc4_471Flag = 1;
 }
 
 static inline uint32_t getCrc(const char *path)
@@ -791,6 +945,83 @@ end:
 	if (file)
 		fclose(file);
 	return crc;
+}
+
+struct newidb_file {
+	uint16_t ofs, size;
+	uint32_t unk_ff, unk_0, idx, unk1, unk2;
+	uint8_t hash[64];
+};
+struct newidb_data {
+	uint32_t tag;
+	uint32_t zero;
+	uint32_t size;
+	uint32_t unk_1;
+	uint32_t unk[8];
+	uint32_t boot0Param[10];
+	uint32_t boot1Param[8];
+	struct newidb_file files[16];
+	uint8_t unk2[8];
+	uint8_t hash[64];
+};
+
+static bool createNewIDB(int num, char **paths, char *outPath)
+{
+	struct newidb_data idb;
+	long fileSize;
+	FILE *f;
+
+	memset(&idb, 0, sizeof(idb));
+	idb.tag = BLOCK_TAG;
+	idb.size = (num << 16) + 0x180;
+	idb.unk_1 = 1;
+	memcpy(idb.boot0Param, gOpts.boot0Param, sizeof(idb.boot0Param));
+	memcpy(idb.boot1Param, gOpts.boot1Param, sizeof(idb.boot1Param));
+
+	int ofs = gOpts.keepCert ? 8 : 4;
+
+	for (int i = 0; i < num; i++) {
+		FILE *f;
+		char *path = paths[i];
+		if (!(f = fopen(path, "rb"))) {
+			LOGE("open %s failed\n", path);
+			return false;
+		}
+		if (fseek(f, 0, SEEK_END) == -1 ||
+			(fileSize = ftell(f)) == -1 ||
+			fseek(f, 0, SEEK_SET) == -1) {
+			LOGE("seek %s failed\n", path);
+			fclose(f);
+			return false;
+		}
+		int blocks = ((fileSize - 1) >> 11) + 1;
+		int bufsize = blocks << 11;
+		void *buf = malloc(bufsize);
+		memset(buf, 0, bufsize);
+		if (!fread(buf, 1, fileSize, f)) {
+			LOGE("read %s failed\n", path);
+			fclose(f);
+			return false;
+		}
+		fclose(f);
+		idb.files[i].ofs = ofs;
+		idb.files[i].size = blocks * 4;
+		idb.files[i].unk_ff = 0xffffffff;
+		idb.files[i].unk_0 = 0;
+		idb.files[i].idx = i + 1;
+		sha256_csum(buf, bufsize, idb.files[i].hash);
+		free(buf);
+		ofs += blocks * 4;
+	}
+	sha256_csum((void *)&idb, sizeof(idb) - sizeof(idb.hash), idb.hash);
+	f = fopen(outPath, "wb");
+	if (!f) {
+		LOGE("cannot create %s\n", outPath);
+		return false;
+	}
+	fwrite(&idb, 1, sizeof(idb), f);
+	fclose(f);
+	return true;
 }
 
 static bool mergeBoot(int argc, char **argv)
@@ -819,6 +1050,53 @@ static bool mergeBoot(int argc, char **argv)
 		printf("---------------\nUSING CONFIG:\n");
 		printOpts(stdout);
 		printf("---------------\n\n");
+	}
+
+	if (gOpts.newIDB) {
+		int num = gOpts.code471Num + gOpts.code472Num;
+		char **paths;
+		void *newBuf;
+
+		if (!(paths = malloc(num * sizeof(char *))))
+			return false;
+		for (int i = 0; i < gOpts.code471Num; i++)
+			paths[i] = gOpts.code471Path[i];
+		for (int i = 0; i < gOpts.code472Num; i++)
+			paths[i + gOpts.code471Num] = gOpts.code472Path[i];
+		if (!createNewIDB(num, paths, "UsbHead.bin")) {
+			free(paths);
+			return false;
+		}
+		free(paths);
+
+		if (!(newBuf = realloc(gOpts.code471Path,
+			(gOpts.code471Num + 1)* sizeof(line_t))))
+			return false;
+		gOpts.code471Path = newBuf;
+		memmove(gOpts.code471Path + 1, gOpts.code471Path,
+			gOpts.code471Num * sizeof(line_t));
+		gOpts.code471Num++;
+		strcpy(gOpts.code471Path[0], "UsbHead.bin");
+
+		if (!(paths = malloc(gOpts.loaderNum * sizeof(char *))))
+			return false;
+		for (int i = 0; i < gOpts.loaderNum; i++)
+			paths[i] = gOpts.loader[i].path;
+		if (!createNewIDB(num, paths, "FlashHead.bin")) {
+			free(paths);
+			return false;
+		}
+		free(paths);
+
+		if (!(newBuf = realloc(gOpts.loader,
+			(gOpts.loaderNum + 1)* sizeof(name_entry))))
+			return false;
+		gOpts.loader = newBuf;
+		memmove(gOpts.loader + 1, gOpts.loader,
+			gOpts.loaderNum * sizeof(name_entry));
+		gOpts.loaderNum++;
+		strcpy(gOpts.loader[0].name, "FlashHead");
+		strcpy(gOpts.loader[0].path, "FlashHead.bin");
 	}
 
 	outFile = fopen(gOpts.outPath, "wb+");
@@ -856,17 +1134,17 @@ static bool mergeBoot(int argc, char **argv)
 
 	LOGD("write code 471\n");
 	for (i = 0; i < gOpts.code471Num; i++) {
-		if (!writeFile(outFile, (char *)gOpts.code471Path[i], false))
+		if (!writeFile(outFile, (char *)gOpts.code471Path[i], false, gOpts.rc4Off471))
 			goto end;
 	}
 	LOGD("write code 472\n");
 	for (i = 0; i < gOpts.code472Num; i++) {
-		if (!writeFile(outFile, (char *)gOpts.code472Path[i], false))
+		if (!writeFile(outFile, (char *)gOpts.code472Path[i], false, gOpts.rc4Off))
 			goto end;
 	}
 	LOGD("write loader\n");
 	for (i = 0; i < gOpts.loaderNum; i++) {
-		if (!writeFile(outFile, gOpts.loader[i].path, true))
+		if (!writeFile(outFile, gOpts.loader[i].path, true, false))
 			goto end;
 	}
 	fflush(outFile);
@@ -880,6 +1158,10 @@ static bool mergeBoot(int argc, char **argv)
 end:
 	if (outFile)
 		fclose(outFile);
+	if (gOpts.newIDB) {
+		remove("UsbHead.bin");
+		remove("FlashHead.bin");
+	}
 	return ret;
 }
 
@@ -892,7 +1174,6 @@ static inline void wide2str(const uint16_t *wide, char *str, int len)
 	for (i = 0; i < len; i++) {
 		str[i] = (char)(wide[i] & 0xFF);
 	}
-	str[len] = 0;
 }
 
 static bool unpackEntry(rk_boot_entry *entry, const char *name, FILE *inFile)

@@ -57,6 +57,10 @@ typedef char line_t[MAX_LINE_LEN];
 #define SEC_472             "[CODE472_OPTION]"
 #define SEC_LOADER          "[LOADER_OPTION]"
 #define SEC_OUT             "[OUTPUT]"
+#define SEC_SYSTEM          "[SYSTEM]"
+#define SEC_FLAG            "[FLAG]"
+#define SEC_BOOT0_PARAM     "[BOOT0_PARAM]"
+#define SEC_BOOT1_PARAM     "[BOOT1_PARAM]"
 
 #define OPT_NAME            "NAME"
 #define OPT_MAJOR           "MAJOR"
@@ -67,6 +71,12 @@ typedef char line_t[MAX_LINE_LEN];
 #define OPT_SLEEP           "Sleep"
 #define OPT_LOADER_NAME     "LOADER"
 #define OPT_OUT_PATH        "PATH"
+#define OPT_NEW_IDB         "NEWIDB"
+#define OPT_471_RC4_OFF     "471_RC4_OFF"
+#define OPT_RC4_OFF         "RC4_OFF"
+#define OPT_WORD            "WORD_"
+#define OPT_IDB_PATH        "IDB_PATH"
+#define OPT_CREATE_IDB      "CREATE_IDB"
 
 typedef struct {
 	char       name[MAX_LINE_LEN];
@@ -86,12 +96,23 @@ typedef struct {
 	int         loaderNum;
 	name_entry* loader;
 	char        outPath[MAX_LINE_LEN * 2];
+	uint32_t    boot0Param[10];
+	uint32_t    boot1Param[8];
+	bool        newIDB;
+	bool        keepCert;
+	bool        rc4Off471;
+	bool        rc4Off;
+	char        idbPath[MAX_LINE_LEN * 2];
+	bool        createIDB;
 } options;
 
 
 #define TAG						0x544F4F42
+#define TAG_NEW					0x2052444c
 #define MERGER_VERSION          0x01030000
+#define MERGER_VERSION_NEW      0x01000000
 #define SMALL_PACKET			512
+#define BLOCK_TAG               0x534e4b52
 
 #define MAX_NAME_LEN            20
 #define MAX_MERGE_SIZE          (512 << 10)
@@ -147,7 +168,7 @@ typedef struct {
 	uint8_t   second;
 } rk_time;
 
-#define  BOOT_RESERVED_SIZE 57
+#define  BOOT_RESERVED_SIZE 56
 typedef struct {
 	uint32_t        tag;
 	uint16_t        size;
@@ -166,6 +187,7 @@ typedef struct {
 	uint8_t         loaderSize;
 	uint8_t         signFlag;
 	uint8_t         rc4Flag;
+	uint8_t         rc4_471Flag;
 	uint8_t         reserved[BOOT_RESERVED_SIZE];
 } rk_boot_header;
 
